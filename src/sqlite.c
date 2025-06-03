@@ -7,10 +7,19 @@
 
 #include <sqlite3.h>
 
+/* Database */
+typedef struct {
+    PyObject_HEAD
+    PyObject *filename;
+    sqlite3 *db;
+} Database;
 
-/* global objects */
 
-static PyObject *Error = NULL;
+/* module state */
+typedef struct {
+    PyObject *error;
+    PyObject *rowtype_type;
+} module_state;
 
 
 /* -------------------------------------------------------------------------- */
@@ -101,14 +110,28 @@ static PyObject *Error = NULL;
    Row
    -------------------------------------------------------------------------- */
 
+/* RowType_Type.tp_traverse */
+static int
+RowType_tp_traverse(PyObject *self, visitproc visit, void *arg)
+{
+    Py_VISIT(Py_TYPE(self)); // heap type
+    return PyType_Type.tp_traverse(self, visit, arg);
+}
+
+
+/* RowType_Type.tp_clear */
+static int
+RowType_tp_clear(PyObject *self)
+{
+    return PyType_Type.tp_clear(self);
+}
+
+
 /* RowType_Type.tp_dealloc */
 static void
-RowType_tp_dealloc(PyTypeObject *type)
+RowType_tp_dealloc(PyObject *self)
 {
-
-    printf("RowType_tp_dealloc\n");
-
-    PyMemberDef *member = type->tp_members;
+    PyMemberDef *member = ((PyTypeObject *)self)->tp_members;
 
     if (member != NULL) {
         for (; member->name; member++) {
@@ -117,14 +140,24 @@ RowType_tp_dealloc(PyTypeObject *type)
             member->name = NULL;
         }
     }
-    PyType_Type.tp_dealloc((PyObject *)type);
+    RowType_tp_clear(self);
+    Py_XDECREF(Py_TYPE(self)); // heap type
+    PyType_Type.tp_dealloc(self);
 }
 
 
-static PyTypeObject RowType_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "mood.sqlite.RowType",
-    .tp_dealloc = (destructor)RowType_tp_dealloc,
+static PyType_Slot rowtype_type_slots[] = {
+    {Py_tp_traverse, RowType_tp_traverse},
+    {Py_tp_clear, RowType_tp_clear},
+    {Py_tp_dealloc, RowType_tp_dealloc},
+    {0, NULL}
+};
+
+
+static PyType_Spec rowtype_type_spec = {
+    .name = "mood.sqlite.RowType",
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC,
+    .slots = rowtype_type_slots
 };
 
 
@@ -135,13 +168,19 @@ __strdup__(const char *s)
 }
 
 static PyTypeObject *
-__new_rowtype__(sqlite3_stmt *stmt, int len)
+__new_rowtype__(Database *self, sqlite3_stmt *stmt, int len)
 {
+    module_state *state = NULL;
     static const char *_name_ = "mood.sqlite.Row";
     PyStructSequence_Field *_fields_ = NULL;
     PyStructSequence_Desc *_desc_ = NULL;
     PyTypeObject *_type_ = NULL;
     int i;
+
+    state = __PyObject_GetState__((PyObject *)self);
+    if (!state) {
+        goto fail;
+    }
 
     _fields_ = PyMem_Calloc((len + 1), sizeof(PyStructSequence_Field));
     if (!_fields_) {
@@ -160,9 +199,8 @@ __new_rowtype__(sqlite3_stmt *stmt, int len)
     _desc_->name = _name_;
     _desc_->fields = _fields_;
     _desc_->n_in_sequence = len;
-
     if ((_type_ = PyStructSequence_NewType(_desc_))) {
-        Py_SET_TYPE(_type_, &RowType_Type);
+        Py_SET_TYPE(_type_, (PyTypeObject *)Py_NewRef(state->rowtype_type)); // hmmm...
         PyMem_Free(_desc_);
         PyMem_Free(_fields_);
         return _type_;
@@ -194,14 +232,6 @@ fail:
    Database
    -------------------------------------------------------------------------- */
 
-/* Database */
-typedef struct {
-    PyObject_HEAD
-    PyObject *filename;
-    sqlite3 *db;
-} Database;
-
-
 static int
 __db_err_occurred__(Database *self)
 {
@@ -219,27 +249,30 @@ __db_err_occurred__(Database *self)
 static void
 __db_set_err__(Database *self)
 {
+    module_state *state = NULL;
     PyObject *_filename_ = NULL;
 
-    if (self->filename) {
-        if ((_filename_ = _PyUnicode_DecodeFSDefault(self->filename))) {
-            PyErr_Format(
-                Error,
-                "[%i] %s: %R",
-                __sqlite_db_extderr__(self->db),
-                __sqlite_db_errmsg__(self->db),
-                _filename_
-            );
-            Py_DECREF(_filename_);
+    if ((state = __PyObject_GetState__((PyObject *)self))) {
+        if (self->filename) {
+            if ((_filename_ = _PyUnicode_DecodeFSDefault(self->filename))) {
+                PyErr_Format(
+                    state->error,
+                    "[%i] %s: %R",
+                    __sqlite_db_extderr__(self->db),
+                    __sqlite_db_errmsg__(self->db),
+                    _filename_
+                );
+                Py_DECREF(_filename_);
+            }
         }
-    }
-    else {
-        PyErr_Format(
-            Error,
-            "[%i] %s",
-            __sqlite_db_extderr__(self->db),
-            __sqlite_db_errmsg__(self->db)
-        );
+        else {
+            PyErr_Format(
+                state->error,
+                "[%i] %s",
+                __sqlite_db_extderr__(self->db),
+                __sqlite_db_errmsg__(self->db)
+            );
+        }
     }
 }
 
@@ -319,67 +352,6 @@ __db_close__(Database *self)
 
 /* Database_Type ------------------------------------------------------------ */
 
-/* Database_Type.tp_finalize */
-static void
-Database_tp_finalize(Database *self)
-{
-    PyObject *exc_type, *exc_value, *exc_traceback;
-
-    PyErr_Fetch(&exc_type, &exc_value, &exc_traceback);
-    if (__db_close__(self)) {
-        PyErr_WriteUnraisable((PyObject *)self);
-    }
-    PyErr_Restore(exc_type, exc_value, exc_traceback);
-}
-
-
-/* Database_Type.tp_traverse */
-static int
-Database_tp_traverse(Database *self, visitproc visit, void *arg)
-{
-    Py_VISIT(self->filename);
-    return 0;
-}
-
-
-/* Database_Type.tp_clear */
-static int
-Database_tp_clear(Database *self)
-{
-    Py_CLEAR(self->filename);
-    return 0;
-}
-
-
-/* Database_Type.tp_dealloc */
-static void
-Database_tp_dealloc(Database *self)
-{
-    if (PyObject_CallFinalizerFromDealloc((PyObject *)self)) {
-        return;
-    }
-    PyObject_GC_UnTrack(self);
-    Database_tp_clear(self);
-    PyObject_GC_Del(self);
-}
-
-
-/* Database_Type.tp_repr */
-static PyObject *
-Database_tp_repr(Database *self)
-{
-    PyObject *_filename_ = NULL, *result = NULL;
-
-    if ((_filename_ = _PyUnicode_DecodeFSDefault(self->filename))) {
-        result = PyUnicode_FromFormat(
-            "<%s(%R)>", Py_TYPE(self)->tp_name, _filename_
-        );
-        Py_DECREF(_filename_);
-    }
-    return result;
-}
-
-
 /* Database_Type.tp_new */
 static PyObject *
 Database_tp_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
@@ -411,6 +383,69 @@ static int
 Database_tp_init(Database *self, PyObject *args, PyObject *kwargs)
 {
     return 0;
+}
+
+
+/* Database_Type.tp_traverse */
+static int
+Database_tp_traverse(Database *self, visitproc visit, void *arg)
+{
+    Py_VISIT(self->filename);
+    Py_VISIT(Py_TYPE(self)); // heap type
+    return 0;
+}
+
+
+/* Database_Type.tp_finalize */
+static void
+Database_tp_finalize(Database *self)
+{
+    PyObject *exc_type, *exc_value, *exc_traceback;
+
+    PyErr_Fetch(&exc_type, &exc_value, &exc_traceback);
+    if (__db_close__(self)) {
+        PyErr_WriteUnraisable((PyObject *)self);
+    }
+    PyErr_Restore(exc_type, exc_value, exc_traceback);
+}
+
+
+/* Database_Type.tp_clear */
+static int
+Database_tp_clear(Database *self)
+{
+    Py_CLEAR(self->filename);
+    return 0;
+}
+
+
+/* Database_Type.tp_dealloc */
+static void
+Database_tp_dealloc(Database *self)
+{
+    if (PyObject_CallFinalizerFromDealloc((PyObject *)self)) {
+        return;
+    }
+    PyObject_GC_UnTrack(self);
+    Database_tp_clear(self);
+    Py_XDECREF(Py_TYPE(self)); // heap type
+    PyObject_GC_Del(self);
+}
+
+
+/* Database_Type.tp_repr */
+static PyObject *
+Database_tp_repr(Database *self)
+{
+    PyObject *_filename_ = NULL, *result = NULL;
+
+    if ((_filename_ = _PyUnicode_DecodeFSDefault(self->filename))) {
+        result = PyUnicode_FromFormat(
+            "<%s(%R)>", Py_TYPE(self)->tp_name, _filename_
+        );
+        Py_DECREF(_filename_);
+    }
+    return result;
 }
 
 
@@ -485,7 +520,7 @@ __stmt_row__(
     int i, rc = -1;
 
     if (!_type_) {
-        _type_ = __new_rowtype__(stmt, len);
+        _type_ = __new_rowtype__(self, stmt, len);
         if (!_type_) {
             goto exit;
         }
@@ -728,7 +763,7 @@ Database_executescript(Database *self, PyObject *args)
 static PyMethodDef Database_tp_methods[] = {
     {"execute", (PyCFunction)Database_execute, METH_VARARGS, NULL},
     {"executescript", (PyCFunction)Database_executescript, METH_VARARGS, NULL},
-    {NULL}  /* Sentinel */
+    {NULL}
 };
 
 
@@ -741,32 +776,32 @@ Database_readonly_getter(Database *self, void *closure)
 
 
 /* Database_Type.tp_getsets */
-static PyGetSetDef Database_tp_getsets[] = {
-    {
-        "readonly", (getter)Database_readonly_getter,
-        _Py_READONLY_ATTRIBUTE, NULL, NULL
-    },
-    {NULL}  /* Sentinel */
+static PyGetSetDef Database_tp_getset[] = {
+    {"readonly", (getter)Database_readonly_getter, _Py_READONLY_ATTRIBUTE, NULL, NULL},
+    {NULL}
 };
 
 
-/* Database_Type ------------------------------------------------------------ */
+static PyType_Slot database_type_slots[] = {
+    {Py_tp_doc, "Database(name[, flags])"},
+    {Py_tp_new, Database_tp_new},
+    {Py_tp_init, Database_tp_init},
+    {Py_tp_traverse, Database_tp_traverse},
+    {Py_tp_finalize, Database_tp_finalize},
+    {Py_tp_clear, Database_tp_clear},
+    {Py_tp_dealloc, Database_tp_dealloc},
+    {Py_tp_repr, Database_tp_repr},
+    {Py_tp_methods, Database_tp_methods},
+    {Py_tp_getset, Database_tp_getset},
+    {0, NULL}
+};
 
-static PyTypeObject Database_Type = {
-    PyVarObject_HEAD_INIT(NULL, 0)
-    .tp_name = "mood.sqlite.Database",
-    .tp_basicsize = sizeof(Database),
-    .tp_dealloc = (destructor)Database_tp_dealloc,
-    .tp_repr = (reprfunc)Database_tp_repr,
-    .tp_flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_HAVE_FINALIZE,
-    .tp_doc = "Database()",
-    .tp_traverse = (traverseproc)Database_tp_traverse,
-    .tp_clear = (inquiry)Database_tp_clear,
-    .tp_methods = Database_tp_methods,
-    .tp_getset = Database_tp_getsets,
-    .tp_init = (initproc)Database_tp_init,
-    .tp_new = Database_tp_new,
-    .tp_finalize = (destructor)Database_tp_finalize,
+
+static PyType_Spec database_type_spec = {
+    .name = "mood.sqlite.Database",
+    .basicsize = sizeof(Database),
+    .flags = Py_TPFLAGS_DEFAULT | Py_TPFLAGS_BASETYPE | Py_TPFLAGS_HAVE_GC | Py_TPFLAGS_HAVE_FINALIZE,
+    .slots = database_type_slots
 };
 
 
@@ -819,16 +854,30 @@ static PyMethodDef sqlite_m_methods[] = {
 static int
 sqlite_m_slots_exec(PyObject *module)
 {
-    RowType_Type.tp_base = &PyType_Type;
-    if (
-        PyType_Ready(&RowType_Type) ||
-        PyModule_AddStringConstant(module, "__version__", PKG_VERSION) ||
-        _PyModule_AddNewException(
-            module, "Error", "mood.sqlite", NULL, NULL, &Error
-        ) ||
+    module_state *state = NULL;
+    PyObject *database_type = NULL;
 
-        // Database
-        _PyModule_AddType(module, "Database", &Database_Type)||
+    if (
+        !(state = __PyModule_GetState__(module)) ||
+        _PyModule_AddNewException(
+            module,
+            "Error",
+            "mood.sqlite",
+            PyExc_RuntimeError,
+            NULL,
+            &state->error
+        ) ||
+        !(
+            state->rowtype_type = PyType_FromModuleAndSpec(
+                module, &rowtype_type_spec, (PyObject *)&PyType_Type
+            )
+        ) ||
+        !(
+            database_type = PyType_FromModuleAndSpec(
+                module, &database_type_spec, NULL
+            )
+        ) ||
+        PyModule_AddObject(module, "Database", database_type) || // steals ref
         _PyModule_AddIntMacro(module, SQLITE_OPEN_READONLY) ||
         _PyModule_AddIntMacro(module, SQLITE_OPEN_READWRITE) ||
         _PyModule_AddIntMacro(module, SQLITE_OPEN_CREATE) ||
@@ -837,7 +886,8 @@ sqlite_m_slots_exec(PyObject *module)
         _PyModule_AddIntMacro(module, SQLITE_OPEN_FULLMUTEX) ||
         _PyModule_AddIntMacro(module, SQLITE_OPEN_SHAREDCACHE) ||
         _PyModule_AddIntMacro(module, SQLITE_OPEN_PRIVATECACHE) ||
-        _PyModule_AddIntMacro(module, SQLITE_OPEN_NOFOLLOW)
+        _PyModule_AddIntMacro(module, SQLITE_OPEN_NOFOLLOW) ||
+        PyModule_AddStringConstant(module, "__version__", PKG_VERSION)
     ) {
         return -1;
     }
@@ -856,7 +906,15 @@ static struct PyModuleDef_Slot sqlite_m_slots[] = {
 static int
 sqlite_m_traverse(PyObject *module, visitproc visit, void *arg)
 {
-    Py_VISIT(Error);
+    printf("sqlite_m_traverse\n");
+
+    module_state *state = NULL;
+
+    if (!(state = __PyModule_GetState__(module))) {
+        return -1;
+    }
+    Py_VISIT(state->rowtype_type);
+    Py_VISIT(state->error);
     return 0;
 }
 
@@ -865,7 +923,15 @@ sqlite_m_traverse(PyObject *module, visitproc visit, void *arg)
 static int
 sqlite_m_clear(PyObject *module)
 {
-    Py_CLEAR(Error);
+    printf("sqlite_m_clear\n");
+
+    module_state *state = NULL;
+
+    if (!(state = __PyModule_GetState__(module))) {
+        return -1;
+    }
+    Py_CLEAR(state->rowtype_type);
+    Py_CLEAR(state->error);
     return 0;
 }
 
@@ -883,7 +949,7 @@ static PyModuleDef sqlite_def = {
     PyModuleDef_HEAD_INIT,
     .m_name = "sqlite",
     .m_doc = "mood sqlite module",
-    .m_size = 0,
+    .m_size = sizeof(module_state),
     .m_methods = sqlite_m_methods,
     .m_slots = sqlite_m_slots,
     .m_traverse = (traverseproc)sqlite_m_traverse,
