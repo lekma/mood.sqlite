@@ -855,7 +855,6 @@ static int
 sqlite_m_slots_exec(PyObject *module)
 {
     module_state *state = NULL;
-    PyObject *database_type = NULL;
 
     if (
         !(state = __PyModule_GetState__(module)) ||
@@ -872,12 +871,7 @@ sqlite_m_slots_exec(PyObject *module)
                 module, &rowtype_type_spec, (PyObject *)&PyType_Type
             )
         ) ||
-        !(
-            database_type = PyType_FromModuleAndSpec(
-                module, &database_type_spec, NULL
-            )
-        ) ||
-        PyModule_AddObject(module, "Database", database_type) || // steals ref
+        _PyModule_AddTypeFromSpec(module, &database_type_spec, NULL, NULL) ||
         _PyModule_AddIntMacro(module, SQLITE_OPEN_READONLY) ||
         _PyModule_AddIntMacro(module, SQLITE_OPEN_READWRITE) ||
         _PyModule_AddIntMacro(module, SQLITE_OPEN_CREATE) ||
