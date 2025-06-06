@@ -141,8 +141,9 @@ RowType_tp_dealloc(PyObject *self)
         }
     }
     RowType_tp_clear(self);
-    Py_XDECREF(Py_TYPE(self)); // heap type
+    PyTypeObject *type = Py_TYPE(self);
     PyType_Type.tp_dealloc(self);
+    Py_XDECREF(type); // heap type
 }
 
 
@@ -428,8 +429,9 @@ Database_tp_dealloc(Database *self)
     }
     PyObject_GC_UnTrack(self);
     Database_tp_clear(self);
-    Py_XDECREF(Py_TYPE(self)); // heap type
+    PyTypeObject *type = Py_TYPE(self);
     PyObject_GC_Del(self);
+    Py_XDECREF(type); // heap type
 }
 
 
