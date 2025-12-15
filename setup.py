@@ -14,7 +14,7 @@ from sys import argv
 
 # pkg
 pkg_name = "mood.sqlite"
-pkg_version = "1.0.0"
+pkg_version = "2.0.0"
 pkg_desc = "mood sqlite module"
 
 PKG_VERSION = ("PKG_VERSION", "\"{0}\"".format(pkg_version))
@@ -23,8 +23,8 @@ err_msg = "Aborted: {0}-{1} requires {{0}} >= {{1}}".format(pkg_name, pkg_versio
 
 def check_version(current_version, minimum_version, name):
     if (
-        not current_version or
-        (LooseVersion(current_version) < LooseVersion(minimum_version))
+        (not current_version) or
+        ((LooseVersion(current_version) < LooseVersion(minimum_version)))
     ):
         raise SystemExit(err_msg.format(name, minimum_version))
 
